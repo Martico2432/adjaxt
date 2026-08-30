@@ -1,0 +1,5 @@
+dist/
+.venv/
+.pytest_cache/
+tests/__pycache__/
+src/adjaxt/__pycache__/
