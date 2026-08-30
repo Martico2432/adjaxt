@@ -12,9 +12,11 @@ from adjaxt.config import (
     Qwen3MoEModelConfig,
     compute_rope_freqs,
 )
-from adjaxt import layers, models, model_maps, sharding, export, optim
+from adjaxt import layers, models, model_maps, sharding, export, optim, approx
+from adjaxt.approx import WorkerPlan, approx, benchmark_step_throughput
+from adjaxt.train import fit, push_fit
 
-__version__ = "0.0.1.5"
+__version__ = "0.0.2.0"
 
 __all__ = [
     # Configs
@@ -34,5 +36,10 @@ __all__ = [
     "model_maps",
     "sharding",
     "export",
-    "optim"
+    "optim",
+    "WorkerPlan",
+    "approx",
+    "benchmark_step_throughput",
+    "fit",
+    "push_fit",
 ]
