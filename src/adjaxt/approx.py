@@ -16,43 +16,56 @@ class WorkerPlan:
     assigned_chunks: List[str]
     target_sync_interval_sec: float
 
+def default_loss_fn(batch: dict, params: dict, forward_fn: Callable) -> jax.Array:
+    """Default cross-entropy loss function."""
+    logits = forward_fn(batch["input_ids"], params)
+    labels = batch.get("labels", batch["input_ids"])
+    shift_logits = logits[:, :-1, :]
+    shift_labels = labels[:, 1:]
+    loss = optax.softmax_cross_entropy_with_integer_labels(
+        logits=shift_logits,
+        labels=shift_labels,
+    )
+    return jnp.mean(loss)
+
 
 def benchmark_step_throughput(
-    forward_fn: Callable,
     params: dict,
     optimizer: optax.GradientTransformation,
     sample_batch: dict,
-    num_warmup: int = 3,
-    num_steps: int = 10,
+    forward_fn: Optional[Callable] = None,
+    loss_fn: Optional[Callable] = None,
+    use_fp32_sandbox: bool = True,
+    num_warmup: int = 2,
+    num_steps: int = 5,
 ) -> float:
-    """Profiles local JAX step execution time (steps/second) on warm device memory."""
+    """Benchmarks step throughput using the framework's core step_fn."""
+    
+    # Import locally to avoid circular dependencies if needed
+    from adjaxt.train import build_loss_and_step_fn 
+
+    step_fn = build_loss_and_step_fn(
+        forward_fn=forward_fn,
+        optimizer=optimizer,
+        loss_fn=loss_fn,
+        use_fp32_sandbox=use_fp32_sandbox,
+    )
+    
     opt_state = optimizer.init(params)
-
-    @jax.jit
-    def step_fn(p, s, b):
-        def loss_fn(model_params):
-            logits = forward_fn(b["input_ids"], model_params)
-            labels = b.get("labels", b["input_ids"])
-            return jnp.mean(optax.softmax_cross_entropy_with_integer_labels(logits=logits, labels=labels))
-
-        loss, grads = jax.value_and_grad(loss_fn)(p)
-        updates, new_s = optimizer.update(grads, s, p)
-        new_p = optax.apply_updates(p, updates)
-        return new_p, new_s, loss
-
-    # Warmup to force JIT compilation
+    
+    # Warmup steps
     for _ in range(num_warmup):
         params, opt_state, loss = step_fn(params, opt_state, sample_batch)
-    loss.block_until_ready()
+        loss.block_until_ready()
 
-    # Timed benchmark
-    start_time = time.perf_counter()
+    # Timed benchmarking steps
+    start_t = time.perf_counter()
     for _ in range(num_steps):
         params, opt_state, loss = step_fn(params, opt_state, sample_batch)
-    loss.block_until_ready()
-    elapsed = time.perf_counter() - start_time
+        loss.block_until_ready()
+    elapsed = time.perf_counter() - start_t
 
-    return num_steps / elapsed
+    return num_steps / max(elapsed, 1e-6)
 
 
 def claim_chunks_from_ledger(

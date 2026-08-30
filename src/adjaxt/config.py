@@ -6,14 +6,26 @@ import jax.numpy as jnp
 from typing import Callable
 
 @dataclass(frozen=True)
+class PrecisionPolicy:
+    param_dtype: jnp.dtype = jnp.bfloat16    # Storage dtype in memory
+    compute_dtype: jnp.dtype = jnp.bfloat16  # Matrix multiplication & attention dtype
+    output_dtype: jnp.dtype = jnp.float32    # Residual & loss accumulator dtype
+
+    @property
+    def is_mixed(self) -> bool:
+        return self.compute_dtype != self.output_dtype
+
+@dataclass(frozen=True)
 class RMSNormConfig:
     dim: int
     eps: float = 1e-6
+    precision: PrecisionPolicy = PrecisionPolicy()
 
 @dataclass(frozen=True)
 class SwiGLUConfig:
     in_dim: int
     hidden_dim: int
+    precision: PrecisionPolicy = PrecisionPolicy()
 
 class StandardAttnImplementation(StrEnum):
     CUDNN = "cudnn"
@@ -24,6 +36,7 @@ class GQAAttnConfig:
     implementation: StandardAttnImplementation
     num_kv_groups: int
     is_causal: bool
+    precision: PrecisionPolicy = PrecisionPolicy()
 
 def compute_rope_freqs(seq_len: int, head_dim: int, theta: float = 10000.0):
     dim_indices = jnp.arange(0, head_dim, 2, dtype=jnp.float32)
@@ -50,6 +63,7 @@ class Qwen3AttnConfig:
     sin_table: jax.Array = field(init=False, compare=False, hash=False)
     max_position_embeddings: int
     n_layers: int
+    precision: PrecisionPolicy = PrecisionPolicy()
 
     def __post_init__(self):
         cos, sin = compute_rope_freqs(
@@ -65,6 +79,7 @@ class Qwen3MLPConfig:
     act_fn: Callable
     in_dim: int
     hidden_dim: int
+    precision: PrecisionPolicy = PrecisionPolicy()
 
 @dataclass(frozen=True)
 class Qwen3MoEBlockConfig:
@@ -72,6 +87,7 @@ class Qwen3MoEBlockConfig:
     top_k: int
     num_experts: int
     d_model: int
+    precision: PrecisionPolicy = PrecisionPolicy()
 
 @dataclass(frozen=True)
 class Qwen3MoELayerConfig:
@@ -79,6 +95,7 @@ class Qwen3MoELayerConfig:
     attn_conf: Qwen3AttnConfig
     post_attn_rms_conf: RMSNormConfig
     moe_block_conf: Qwen3MoEBlockConfig
+    precision: PrecisionPolicy = PrecisionPolicy()
 
 @dataclass(frozen=True)
 class Qwen3MoEModelConfig:
@@ -88,3 +105,4 @@ class Qwen3MoEModelConfig:
     vocab_size: int
     d_model: int
     tie_word_embeddings: bool = False
+    precision: PrecisionPolicy = PrecisionPolicy()

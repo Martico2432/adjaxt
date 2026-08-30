@@ -31,7 +31,7 @@ def run_coordinator(
 
     while True:
         files = list_repo_files(repo_id=repo_id, repo_type="dataset", token=token)
-        pattern = re.compile(rf"^worker_updates/(.+)__round_{current_round}_steps_(\d+)\.safetensors$")
+        pattern = re.compile(rf"^worker_updates/(.+)__round_{current_round}__steps_(\d+)\.safetensors$")
 
         round_updates = []
         for file_path in files:

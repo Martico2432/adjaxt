@@ -1,88 +1,182 @@
-from typing import Union, Callable
-import optax
+"""
+Adjaxt Fused Optimizers
+High-performance hybrid Muon (fused quintic Newton-Schulz) + AdamW optimizer.
+"""
+
+from functools import partial
+from typing import NamedTuple, Optional, Union
 import jax
 import jax.numpy as jnp
+import optax
 
-def newton_schulz_iteration(g: jax.Array, steps: int = 5, eps: float = 1e-7) -> jax.Array:
-    """
-    Applies quintic Newton-Schulz iteration to orthogonalize matrices:
-    X_{k+1} = X_k (3.4445 * I - 4.7750 * A + 2.0315 * A^2), where A = X_k^T X_k.
-    """
-    orig_shape = g.shape
-    if g.ndim > 2:
-        g = g.reshape(g.shape[0], -1)
 
-    # Ensure shape is (rows, cols) where rows >= cols for standard iteration
+# =========================================================================
+# 1. Fused Quintic Newton-Schulz Iteration (Polar Decomposition)
+# =========================================================================
+@partial(jax.jit, static_argnames=("steps",))
+def zeropower_via_newtonschulz5(
+    G: jax.Array,
+    steps: int = 5,
+    eps: float = 1e-7,
+) -> jax.Array:
+    """
+    Newton-Schulz iteration (quintic polynomial) for polar decomposition in Muon.
+    Scales by sqrt(max(M/N, N/M)) to ensure uniform spectral energy across shapes.
+    """
+    if G.ndim != 2:
+        return G
+
+    a, b, c = (3.4445, -4.7750, 2.0315)
+    orig_dtype = G.dtype
+    M, N = G.shape
     transposed = False
-    if g.shape[0] < g.shape[1]:
-        g = g.T
+
+    # Scale by aspect ratio: max(M, N) / min(M, N)
+    scale = jnp.sqrt(jnp.maximum(float(M) / float(N), float(N) / float(M)))
+
+    # Compute in float32 for high precision and stability
+    X = G.astype(jnp.float32)
+    if M > N:
+        X = X.T
         transposed = True
 
-    m, n = g.shape
-    # Scale matrix for stable quintic iteration
-    norm = jnp.linalg.norm(g) + eps
-    x = g / norm
+    # Normalize by Frobenius norm so spectral radius < sqrt(3)
+    norm = jnp.linalg.norm(X) + eps
+    X = X / norm
 
-    # Quintic polynomial coefficients
-    a, b, c = 3.4445, -4.7750, 2.0315
-    eye = jnp.eye(n, dtype=x.dtype)
-
+    # Unrolled Newton-Schulz steps
     for _ in range(steps):
-        a_mat = x.T @ x
-        x = x @ (a * eye + b * a_mat + c * (a_mat @ a_mat))
-
-    # Scale updates to match root-mean-square aspect ratio
-    x = x * jnp.sqrt(jnp.maximum(1.0, m / n))
+        A = X @ X.T
+        B = b * A + c * (A @ A)
+        X = a * X + B @ X
 
     if transposed:
-        x = x.T
+        X = X.T
 
-    return x.reshape(orig_shape)
+    return (X * scale).astype(orig_dtype)
 
-def scale_by_muon(ns_steps: int = 5):
-    """Optax transformation applying Muon orthogonalization to gradient matrices."""
+
+# Alias for backward compatibility
+newton_schulz_iteration = zeropower_via_newtonschulz5
+
+
+# =========================================================================
+# 2. Muon Gradient Transformation
+# =========================================================================
+class MuonState(NamedTuple):
+    count: jax.Array
+    momentum: optax.Updates
+
+
+def muon(
+    learning_rate: Union[float, optax.Schedule] = 6e-4,
+    momentum: float = 0.95,
+    nesterov: bool = True,
+    ns_steps: int = 5,
+    weight_decay: float = 0.01,
+) -> optax.GradientTransformation:
+    """Standard Muon optimizer transformation applying polar orthogonalization."""
     def init_fn(params):
-        return optax.EmptyState()
+        return MuonState(
+            count=jnp.zeros([], dtype=jnp.int32),
+            momentum=jax.tree.map(lambda p: jnp.zeros_like(p), params),
+        )
 
     def update_fn(updates, state, params=None):
-        new_updates = jax.tree.map(
-            lambda g: newton_schulz_iteration(g, steps=ns_steps) if g.ndim >= 2 else g, 
-            updates
+        count = state.count + 1
+        lr = learning_rate(count) if callable(learning_rate) else learning_rate
+
+        # 1. Update momentum PyTree
+        new_momentum = jax.tree.map(
+            lambda g, m: momentum * m + (1.0 - momentum) * g if g.ndim == 2 else m,
+            updates,
+            state.momentum,
         )
-        return new_updates, state
+
+        # 2. Compute update PyTree
+        def _calc_update(g, m, p):
+            if g.ndim != 2:
+                return g
+
+            grad = (1.0 - momentum) * g + momentum * m if nesterov else m
+            v = zeropower_via_newtonschulz5(grad, steps=ns_steps)
+            u = lr * v
+
+            if p is not None and weight_decay > 0.0:
+                u = u + (lr * weight_decay) * p
+
+            return u
+
+        if params is not None:
+            new_updates = jax.tree.map(_calc_update, updates, new_momentum, params)
+        else:
+            new_updates = jax.tree.map(lambda g, m: _calc_update(g, m, None), updates, new_momentum)
+
+        return new_updates, MuonState(count=count, momentum=new_momentum)
 
     return optax.GradientTransformation(init_fn, update_fn)
 
+
+# =========================================================================
+# 3. Hybrid Optimizer (Muon on 2D weights + AdamW on 1D/embeddings)
+# =========================================================================
 def get_param_labels(params):
-    return jax.tree.map(
-        lambda p: "muon" if p.ndim >= 2 else "adamw",
-        params
-    )
+    """
+    Labels parameters for hybrid Muon/AdamW optimization:
+      - >= 2D matrices (excluding embeddings) -> 'muon'
+      - < 2D vectors (biases, layer norms) and embeddings -> 'adamw'
+    """
+    def _label(path, val):
+        str_path = "/".join(str(p.key if hasattr(p, "key") else p) for p in path).lower()
+        if "embed" in str_path or getattr(val, "ndim", 0) < 2:
+            return "adamw"
+        return "muon"
+
+    return jax.tree_util.tree_map_with_path(_label, params)
+
 
 def create_hybrid_muon_adamw(
-    learning_rate: Union[float, Callable[[int], float]], 
-    muon_momentum: float = 0.95, 
-    adam_b1: float = 0.9, 
-    adam_b2: float = 0.999, 
+    learning_rate: float = 6e-4,
+    adamw_lr: Optional[float] = None,
+    muon_momentum: float = 0.95,
+    adamw_b1: float = 0.9,
+    adamw_b2: float = 0.95,
+    adamw_eps: float = 1e-8,
     weight_decay: float = 0.01,
-    ns_steps: int = 5
-):
-    # Momentum MUST be accumulated before orthogonalization
-    muon_chain = optax.chain(
-        optax.trace(decay=muon_momentum, nesterov=False),
-        scale_by_muon(ns_steps=ns_steps),
-        optax.add_decayed_weights(weight_decay),
-        optax.scale_by_learning_rate(learning_rate)
-    )
-    
-    adamw_chain = optax.adamw(
+) -> optax.GradientTransformation:
+    """Partitions 2D weights to Muon and 1D vectors/embeddings to AdamW."""
+    if adamw_lr is None:
+        adamw_lr = learning_rate * 0.5
+
+    muon_opt = muon(
         learning_rate=learning_rate,
-        b1=adam_b1,
-        b2=adam_b2,
-        weight_decay=weight_decay
+        momentum=muon_momentum,
+        weight_decay=weight_decay,
     )
-    
+    adamw_opt = optax.adamw(
+        learning_rate=adamw_lr,
+        b1=adamw_b1,
+        b2=adamw_b2,
+        eps=adamw_eps,
+        weight_decay=weight_decay,
+    )
+
     return optax.multi_transform(
-        transforms={"muon": muon_chain, "adamw": adamw_chain},
-        param_labels=get_param_labels
+        transforms={"muon": muon_opt, "adamw": adamw_opt},
+        param_labels=get_param_labels,
     )
+
+
+# =========================================================================
+# 4. Builder Dispatcher
+# =========================================================================
+def build_optimizer_from_config(config: dict) -> optax.GradientTransformation:
+    """Builds the optimizer directly from train_config.json specifications."""
+    opt_type = str(config.get("optimizer_type", "muon")).lower()
+    lr = float(config.get("inner_lr", 6e-4))
+    wd = float(config.get("weight_decay", 0.01))
+
+    if opt_type in ("muon", "hybrid", "hybrid_muon"):
+        return create_hybrid_muon_adamw(learning_rate=lr, weight_decay=wd)
+
+    return optax.adamw(learning_rate=lr, weight_decay=wd)

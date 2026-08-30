@@ -5,9 +5,11 @@ import optax
 import numpy as np
 
 from adjaxt.optim import (
-    newton_schulz_iteration,
-    get_param_labels,
+    zeropower_via_newtonschulz5,
+    muon,
     create_hybrid_muon_adamw,
+    build_optimizer_from_config,
+    get_param_labels,
 )
 
 
@@ -20,7 +22,7 @@ def test_newton_schulz_shape_and_orthonormal_input():
     q, _ = jnp.linalg.qr(raw.T)
     q_ortho = q.T[:32, :]  # (32, 64) with orthonormal rows
 
-    x_ortho = newton_schulz_iteration(q_ortho, steps=5)
+    x_ortho = zeropower_via_newtonschulz5(q_ortho, steps=5)
     assert x_ortho.shape == q_ortho.shape
 
     # Rows are strictly orthonormal, so off-diagonals must be ~0
@@ -30,7 +32,7 @@ def test_newton_schulz_shape_and_orthonormal_input():
 
     # 2. Test >2D tensor handling
     tensor_3d = jax.random.normal(key, (4, 16, 32))
-    out_3d = newton_schulz_iteration(tensor_3d, steps=5)
+    out_3d = zeropower_via_newtonschulz5(tensor_3d, steps=5)
     assert out_3d.shape == tensor_3d.shape
 
 
@@ -43,7 +45,7 @@ def test_newton_schulz_singular_value_compression():
     s_initial = jnp.linalg.svd(g, compute_uv=False)
     cond_initial = s_initial[0] / s_initial[-1]
 
-    x = newton_schulz_iteration(g, steps=5)
+    x = zeropower_via_newtonschulz5(g, steps=5)
     assert x.shape == g.shape
 
     # Calculate post-iteration singular values

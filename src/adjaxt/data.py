@@ -78,32 +78,20 @@ def pretokenize_and_upload(
     repo_id: str,
     token: Optional[str] = None,
     token_col: str = "input_ids",
-):
-    """Pretokenizes, packs, shards contiguously into Parquet files, and initializes the ledger."""
+) -> None:
     api = HfApi(token=token)
     packed_ds = pack_sequences(seq_len=seq_len, token_col=token_col)(dataset)
-
     total_rows = len(packed_ds)
     num_chunks = math.ceil(total_rows / chunk_size)
     ledger = {}
-
-    os.makedirs("temp_chunks", exist_ok=True)
+    
+    os.makedirs("temp_chunks/pretokenized", exist_ok=True)
 
     for i in range(num_chunks):
         chunk_name = f"chunk_{i:05d}"
-        # contiguous=True ensures continuous slice extraction per worker chunk
         chunk = packed_ds.shard(num_shards=num_chunks, index=i, contiguous=True)
-
-        file_path = f"temp_chunks/{chunk_name}.parquet"
+        file_path = f"temp_chunks/pretokenized/{chunk_name}.parquet"
         chunk.to_parquet(file_path)
-
-        api.upload_file(
-            path_or_fileobj=file_path,
-            path_in_repo=f"pretokenized/{chunk_name}.parquet",
-            repo_id=repo_id,
-            repo_type="dataset",
-        )
-
         ledger[chunk_name] = {
             "status": "unassigned",
             "worker": None,
@@ -111,15 +99,15 @@ def pretokenize_and_upload(
             "rows": len(chunk),
         }
 
-    ledger_path = "temp_chunks/data_ledger.json"
-    with open(ledger_path, "w", encoding="utf-8") as f:
+    with open("temp_chunks/data_ledger.json", "w", encoding="utf-8") as f:
         json.dump(ledger, f, indent=2)
 
-    api.upload_file(
-        path_or_fileobj=ledger_path,
-        path_in_repo="data_ledger.json",
+    # Single atomic commit for all dataset chunks + ledger
+    api.upload_folder(
+        folder_path="temp_chunks",
         repo_id=repo_id,
         repo_type="dataset",
+        commit_message=f"Upload {num_chunks} pretokenized data chunks and ledger",
     )
 
 
