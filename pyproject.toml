@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "adjaxt"
+version = "0.0.1.5"
+description = "Distributed training with JAX on free compute, for humans"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "jax>=0.4.30",
+    "optax>=0.2.2",
+    "orbax-checkpoint>=0.5",
+    "datasets>=2.19",
+    "safetensors>=0.4",
+    "huggingface-hub>=0.23",
+    "numpy",
+]
+
+[project.optional-dependencies]
+cuda = [
+    "jax[cuda12]>=0.4.30",
+]
+test = [
+    "pytest",
+    "transformers",
+    "torch",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/adjaxt"]
