@@ -21,14 +21,17 @@ from adjaxt.train import (
 )
 from adjaxt.config import RMSNormConfig
 
+
 @dataclass
 class DummyChildConfig:
     dim: int
+
 
 @dataclass
 class DummyParentConfig:
     child: DummyChildConfig
     name: str
+
 
 def test_dict_to_dataclass():
     raw_dict = {"child": {"dim": 64}, "name": "test_model"}
@@ -38,6 +41,7 @@ def test_dict_to_dataclass():
     assert cfg.child.dim == 64
     assert cfg.name == "test_model"
 
+
 def test_extract_callable_source():
     def sample_fn(x):
         return x * 2
@@ -45,6 +49,7 @@ def test_extract_callable_source():
     source = _extract_callable_source(sample_fn)
     assert "def sample_fn(x):" in source
     assert "return x * 2" in source
+
 
 def test_build_loss_and_step_fn():
     vocab_size = 8
@@ -61,6 +66,7 @@ def test_build_loss_and_step_fn():
         "input_ids": jnp.ones((2, 4), dtype=jnp.int32),
         "labels": jnp.zeros((2, 4), dtype=jnp.int32),
     }
+
     opt_state = optimizer.init(params)
     new_params, new_opt_state, loss = step_fn(params, opt_state, batch)
 
@@ -68,11 +74,13 @@ def test_build_loss_and_step_fn():
     assert new_params["w"].shape == params["w"].shape
     assert not jnp.isnan(loss)
 
+
 def test_build_optimizer_from_config():
     opt_adam = build_optimizer_from_config({"optimizer_type": "adamw", "inner_lr": 1e-4})
     opt_muon = build_optimizer_from_config({"optimizer_type": "muon", "inner_lr": 1e-3})
     assert isinstance(opt_adam, optax.GradientTransformation)
     assert isinstance(opt_muon, optax.GradientTransformation)
+
 
 def test_start_heartbeat_thread():
     mock_api = MagicMock()
@@ -81,11 +89,12 @@ def test_start_heartbeat_thread():
     stop_event.set()
     assert stop_event.is_set()
 
+
 def test_mark_chunks_completed():
     mock_api = MagicMock()
     mark_chunks_completed(mock_api, "repo/test", ["chunk_00001"], "worker_0")
-    assert mock_api.upload_file.called
-    assert mock_api.delete_file.called
+    assert mock_api.create_commit.called
+
 
 @patch("adjaxt.train.hf_hub_download")
 def test_wait_for_global_sync(mock_download, tmp_path):
@@ -96,6 +105,7 @@ def test_wait_for_global_sync(mock_download, tmp_path):
     mock_api = MagicMock()
     next_round = wait_for_global_sync(mock_api, "repo/test", current_round=1, poll_interval=0.01, timeout=2)
     assert next_round == 2
+
 
 @patch("adjaxt.train.hf_hub_download")
 def test_fetch_train_manifest(mock_download, tmp_path):

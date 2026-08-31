@@ -14,9 +14,8 @@ from adjaxt.layers import (
     qwen3_moe_model,
     qwen3_moe_block,
     rotate_half,
-    apply_rot_pos_emb
+    apply_rot_pos_emb,
 )
-
 from adjaxt.config import (
     RMSNormConfig,
     SwiGLUConfig,
@@ -29,6 +28,7 @@ from adjaxt.config import (
 )
 
 JAX_TO_TORCH_REGISTRY = {}
+
 
 def maps_jax_layer(jax_fn):
     def decorator(torch_cls):
@@ -45,25 +45,20 @@ def _to_torch(val, dtype=None):
         return [_to_torch(v, dtype=dtype) for v in val]
     if isinstance(val, torch.Tensor):
         return val.to(dtype) if dtype is not None else val
-    
-    # Handle JAX/ml_dtypes bfloat16 converting to NumPy
+        
     if hasattr(val, "dtype") and str(val.dtype) == "bfloat16":
-        # Casting to float32 natively forces a writable copy
         np_arr = np.array(val, dtype=np.float32)
         t = torch.from_numpy(np_arr)
         return t.to(dtype if dtype is not None else torch.bfloat16)
-
-    # Force a copy for all other types to fix the "not writable" PyTorch warning
+        
     np_arr = np.array(val, copy=True)
     t = torch.from_numpy(np_arr)
-    
-    # Safely apply dtype only if it is provided
     return t.to(dtype) if dtype is not None else t
+
 
 # ===================================================================================
 # RMS Norm
 # ===================================================================================
-
 @maps_jax_layer(rms_norm)
 class TorchRMSNorm(nn.Module):
     def __init__(self, cfg: RMSNormConfig, w=None):
@@ -80,14 +75,15 @@ class TorchRMSNorm(nn.Module):
         ms = torch.mean(x32.pow(2), dim=-1, keepdim=True)
         return (weight * (x32 * torch.rsqrt(ms + self.eps))).to(x.dtype)
 
+
 # ===================================================================================
 # RoPE
 # ===================================================================================
-
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
+
 
 def apply_rot_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
     cos = cos.to(q.dtype)
@@ -96,10 +92,10 @@ def apply_rot_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: 
     k_rot = (k * cos) + (rotate_half(k) * sin)
     return q_rot, k_rot
 
+
 # ===================================================================================
 # SwiGLU
 # ===================================================================================
-
 @maps_jax_layer(swiglu)
 class TorchSwiGLU(nn.Module):
     def __init__(self, cfg: SwiGLUConfig, w: dict = None):
@@ -117,12 +113,14 @@ class TorchSwiGLU(nn.Module):
         w_gate = self.w_gate if w is None else w["w_gate"]
         w_up = self.w_up if w is None else w["w_up"]
         w_down = self.w_down if w is None else w["w_down"]
-        return (F.silu(x @ w_gate) * (x @ w_up)) @ w_down
+        x_c = x.to(w_gate.dtype)
+        out = (F.silu(x_c @ w_gate) * (x_c @ w_up)) @ w_down
+        return out.to(x.dtype)
+
 
 # ===================================================================================
 # GQA Attention
 # ===================================================================================
-
 @maps_jax_layer(gqa_attn)
 class TorchGQAAttn(nn.Module):
     def __init__(self, cfg: GQAAttnConfig, w=None):
@@ -139,10 +137,8 @@ class TorchGQAAttn(nn.Module):
         target_dtype = q.dtype
         k = k.to(target_dtype)
         v = v.to(target_dtype)
-
         _, _, num_q_heads, _ = q.shape
         _, _, num_kv_heads, _ = k.shape
-
         num_groups = num_q_heads // num_kv_heads
         if num_groups > 1:
             k = k.repeat_interleave(num_groups, dim=2)
@@ -153,6 +149,7 @@ class TorchGQAAttn(nn.Module):
         v = v.transpose(1, 2)
 
         causal_flag = self.cfg.is_causal if attn_mask is None else False
+
         out = F.scaled_dot_product_attention(
             query=q,
             key=k,
@@ -162,10 +159,10 @@ class TorchGQAAttn(nn.Module):
         )
         return out.transpose(1, 2)
 
+
 # ===================================================================================
 # Qwen3 Attention
 # ===================================================================================
-
 @maps_jax_layer(qwen3_attn)
 class TorchQwen3Attn(nn.Module):
     def __init__(self, cfg: Qwen3AttnConfig, w: dict = None):
@@ -214,22 +211,24 @@ class TorchQwen3Attn(nn.Module):
         q_norm_w = self.q_norm if w is None else w["q_norm"]
         k_norm_w = self.k_norm if w is None else w["k_norm"]
 
-        q = self.q_rms((x @ q_proj).view(q_shape), q_norm_w)
-        k = self.k_rms((x @ k_proj).view(kv_shape), k_norm_w)
-        v = (x @ v_proj).view(kv_shape)
+        x_c = x.to(q_proj.dtype)
+        q = self.q_rms((x_c @ q_proj).view(q_shape), q_norm_w)
+        k = self.k_rms((x_c @ k_proj).view(kv_shape), k_norm_w)
+        v = (x_c @ v_proj).view(kv_shape)
 
         cos = self.cos_table[:, :seq_len, :, :]
         sin = self.sin_table[:, :seq_len, :, :]
         q, k = apply_rot_pos_emb(q, k, cos, sin)
 
         attn_out = self.gqa(q, k, v)
-        attn_out = attn_out.reshape(*input_shape, -1)
-        return attn_out @ o_proj
+        attn_out = attn_out.reshape(*input_shape, -1).to(o_proj.dtype)
+
+        return (attn_out @ o_proj).to(x.dtype)
+
 
 # ===================================================================================
 # Qwen3 MLP
 # ===================================================================================
-
 @maps_jax_layer(qwen3_mlp)
 class TorchQwen3MLP(nn.Module):
     def __init__(self, cfg: Qwen3MLPConfig, w: dict = None):
@@ -249,12 +248,13 @@ class TorchQwen3MLP(nn.Module):
         w_gate = self.w_gate if w is None else w["w_gate"]
         w_up = self.w_up if w is None else w["w_up"]
         w_down = self.w_down if w is None else w["w_down"]
-        return (self.act_fn(x @ w_gate) * (x @ w_up)) @ w_down
+        x_c = x.to(w_gate.dtype)
+        return (self.act_fn(x_c @ w_gate) * (x_c @ w_up)) @ w_down
+
 
 # ===================================================================================
 # Qwen3 MoE Block
 # ===================================================================================
-
 @maps_jax_layer(qwen3_moe_block)
 class TorchQwen3MoEBlock(nn.Module):
     def __init__(self, cfg: Qwen3MoEBlockConfig, w: dict = None):
@@ -283,32 +283,24 @@ class TorchQwen3MoEBlock(nn.Module):
         probs = F.softmax(router_logits.float(), dim=-1)
         topk_probs, topk_idx = torch.topk(probs, self.cfg.top_k, dim=-1)
         topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True)
-
+        
         weights = torch.zeros_like(probs).scatter_(1, topk_idx, topk_probs.to(probs.dtype))
 
-        # Ensure tokens match expert weight precision
         expert_tokens = tokens.to(w_gate.dtype)
-        \
-        #gate_out = self.act_fn(torch.einsum("td,edh->eth", expert_tokens, w_gate))
-        #up_out = torch.einsum("td,edh->eth", expert_tokens, w_up)
-        #expert_out = torch.einsum("eth,ehd->etd", gate_out * up_out, w_down)
+        gate_out = F.silu(torch.matmul(expert_tokens.unsqueeze(0), w_gate))  # (E, T, H)
+        up_out   = torch.matmul(expert_tokens.unsqueeze(0), w_up)            # (E, T, H)
+        expert_out = torch.matmul(gate_out * up_out, w_down)                 # (E, T, D)
 
-        # Replace einsum with matmul (broadcasting handles the 'E' experts dimension)
-        gate_out = F.silu(torch.matmul(tokens.unsqueeze(0), w_gate)) # (E, T, H)
-        up_out   = torch.matmul(tokens.unsqueeze(0), w_up)           # (E, T, H)
-        expert_out = torch.matmul(gate_out * up_out, w_down)         # (E, T, D)
-
-        # Replace final einsum with batched matmul
-        weights_exp = weights.unsqueeze(1).to(x.dtype)               # (T, 1, E)
-        expert_out_perm = expert_out.permute(1, 0, 2).to(x.dtype)    # (T, E, D)
+        weights_exp = weights.unsqueeze(1).to(x.dtype)                       # (T, 1, E)
+        expert_out_perm = expert_out.permute(1, 0, 2).to(x.dtype)            # (T, E, D)
         
-        out = torch.matmul(weights_exp, expert_out_perm).squeeze(1)  # (T, D)
+        out = torch.matmul(weights_exp, expert_out_perm).squeeze(1)          # (T, D)
         return out.reshape(x.shape)
+
 
 # ===================================================================================
 # Qwen3 MoE Layer
 # ===================================================================================
-
 @maps_jax_layer(qwen3_moe_layer)
 class TorchQwen3MoELayer(nn.Module):
     def __init__(self, cfg: Qwen3MoELayerConfig, w: dict = None):
@@ -324,21 +316,21 @@ class TorchQwen3MoELayer(nn.Module):
         x = self.input_layernorm(x, None if w is None else w["input_layernorm"])
         x = self.attn(x, None if w is None else w["attn"])
         x = x + residual
+
         residual = x
         x = self.post_attn_layernorm(x, None if w is None else w["post_attn_layernorm"])
         x = self.mlp(x, None if w is None else w["mlp"])
         return residual + x
 
+
 # ===================================================================================
 # Qwen3 MoE Model
 # ===================================================================================
-
 @maps_jax_layer(qwen3_moe_model)
 class TorchQwen3MoEModel(nn.Module):
     def __init__(self, cfg: Qwen3MoEModelConfig, w: dict = None):
         super().__init__()
         self.cfg = cfg
-
         if w is not None:
             self.embeds = nn.Parameter(_to_torch(w["embeds"]))
             self.decoder_blocks = nn.ModuleList([
@@ -363,12 +355,10 @@ class TorchQwen3MoEModel(nn.Module):
     def forward(self, x: torch.Tensor, w: dict = None) -> torch.Tensor:
         embeds = self.embeds if w is None else w["embeds"]
         norm_w = None if w is None else w["norm"]
-
         hidden = embeds[x]
         for i, block in enumerate(self.decoder_blocks):
             lw = None if w is None else w["decoder_blocks"][i]
             hidden = block(hidden, lw)
-
         hidden = self.norm(hidden, norm_w)
         
         if self.cfg.tie_word_embeddings:
@@ -376,6 +366,7 @@ class TorchQwen3MoEModel(nn.Module):
         
         lm_head = self.lm_head if w is None else w["lm_head"]
         return hidden @ lm_head
+
 
 def to_torch_module(jax_fn, cfg, weights=None):
     if jax_fn not in JAX_TO_TORCH_REGISTRY:

@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 from safetensors.numpy import save_file, load_file
 from adjaxt.coordinator import run_coordinator
 
+
 @patch("adjaxt.coordinator.time.sleep", side_effect=InterruptedError("Stop loop"))
 @patch("adjaxt.coordinator.list_repo_files")
 @patch("adjaxt.coordinator.hf_hub_download")
@@ -33,8 +34,8 @@ def test_run_coordinator_single_round(mock_api_cls, mock_download, mock_list_fil
     save_file(w2_grad, str(w2_file))
 
     mock_list_files.return_value = [
-        "worker_updates/worker_1__round_0_steps_100.safetensors",
-        "worker_updates/worker_2__round_0_steps_100.safetensors",
+        "worker_updates/worker_1__round_0__steps_100.safetensors",
+        "worker_updates/worker_2__round_0__steps_100.safetensors",
     ]
 
     def download_router(repo_id, filename, **kwargs):

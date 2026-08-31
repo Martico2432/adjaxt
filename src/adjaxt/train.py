@@ -19,7 +19,7 @@ import inspect
 import textwrap
 import jax.tree_util as jtu
 from adjaxt.data import jax_dataloader
-from adjaxt.export import dataclass_to_dict
+from adjaxt.export import dataclass_to_dict, dict_to_dataclass
 from adjaxt.sharding import save_checkpoint, ModelWeightMap
 import adjaxt.config as cfg_module
 from adjaxt.optim import create_hybrid_muon_adamw
@@ -356,24 +356,6 @@ def build_optimizer_from_config(train_cfg: dict) -> optax.GradientTransformation
     return optax.adamw(learning_rate=lr)
 
 
-def dict_to_dataclass(cls: Any, data: dict) -> Any:
-    """Recursively hydrates a dataclass hierarchy from a nested dictionary."""
-    import dataclasses
-
-    if not dataclasses.is_dataclass(cls):
-        return data
-    fields = {f.name: f.type for f in dataclasses.fields(cls)}
-    init_kwargs = {}
-    for k, v in data.items():
-        if k in fields:
-            ftype = fields[k]
-            if dataclasses.is_dataclass(ftype) and isinstance(v, dict):
-                init_kwargs[k] = dict_to_dataclass(ftype, v)
-            else:
-                init_kwargs[k] = v
-    return cls(**init_kwargs)
-
-
 def fetch_train_manifest(
     repo_id: str,
     token: Optional[str] = None,
@@ -550,7 +532,33 @@ def fit(
         loss_fn=loss_fn,
         use_fp32_sandbox=use_fp32_sandbox
     )
-    current_round = 0
+    try:
+        sync_file = hf_hub_download(
+            repo_id=repo_id,
+            filename="sync_state.json",
+            repo_type="dataset",
+            token=token,
+            force_download=True,
+        )
+        with open(sync_file, "r", encoding="utf-8") as f:
+            sync_state = json.load(f)
+        current_round = sync_state.get("round", 0)
+        print(f"[{worker_id}] Resuming training from global round {current_round}")
+    except Exception:
+        current_round = 0
+        print(f"[{worker_id}] No existing sync state found. Starting from round 0.")
+
+    # Load the global weights (these will correspond to the latest synced round)
+    weights_file = hf_hub_download(
+        repo_id=repo_id,
+        filename="global_weights.safetensors",
+        repo_type="dataset",
+        token=token,
+        force_download=True,
+    )
+    raw_weights = load_file(weights_file)
+    global_weights = {k: jnp.array(v) for k, v in raw_weights.items()}
+    local_weights = {k: jnp.array(v) for k, v in global_weights.items()}
 
     try:
         while True:
@@ -592,13 +600,16 @@ def fit(
                 if steps_completed % 50 == 0 or steps_completed == current_h:
                     print(f"[{worker_id}] Round {current_round} | Step {steps_completed}/{current_h} | Loss: {loss:.4f}")
 
-            loss.block_until_ready()
-            compute_elapsed = time.perf_counter() - start_compute_time
-
+            # 1. First check if any steps actually ran
             if steps_completed == 0:
                 print(f"[{worker_id}] No data chunks available. Training finished.")
                 break
 
+            # 2. THEN wait for the JAX computation to finish and measure time
+            loss.block_until_ready()
+            compute_elapsed = time.perf_counter() - start_compute_time
+
+            # Update EMA Throughput passively
             round_throughput = steps_completed / max(compute_elapsed, 1e-4)
             throughput_ema = (ema_alpha * round_throughput) + ((1.0 - ema_alpha) * throughput_ema)
             print(

@@ -3,6 +3,7 @@
 from adjaxt.config import (
     RMSNormConfig,
     SwiGLUConfig,
+    PrecisionPolicy,
     StandardAttnImplementation,
     GQAAttnConfig,
     Qwen3AttnConfig,
@@ -16,12 +17,13 @@ from adjaxt import layers, models, model_maps, sharding, export, optim, approx
 from adjaxt.approx import WorkerPlan, approx, benchmark_step_throughput
 from adjaxt.train import fit, push_fit
 
-__version__ = "0.0.2.9"
+__version__ = "0.0.2.10"
 
 __all__ = [
     # Configs
     "RMSNormConfig",
     "SwiGLUConfig",
+    "PrecisionPolicy",
     "StandardAttnImplementation",
     "GQAAttnConfig",
     "Qwen3AttnConfig",

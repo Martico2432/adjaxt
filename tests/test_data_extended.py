@@ -5,10 +5,12 @@ from datasets import Dataset
 from unittest.mock import MagicMock, patch
 from adjaxt.data import jax_dataloader, pretokenize_and_upload
 
+
 def test_jax_dataloader_drop_last_error():
     ds = Dataset.from_dict({"input_ids": [[1, 2], [3, 4]]})
     with pytest.raises(ValueError, match="Dataset size .* is smaller than batch_size"):
         next(jax_dataloader(ds, batch_size=8, drop_last=True))
+
 
 @patch("adjaxt.data.HfApi")
 def test_pretokenize_and_upload(mock_api_cls, tmp_path, monkeypatch):
@@ -25,5 +27,6 @@ def test_pretokenize_and_upload(mock_api_cls, tmp_path, monkeypatch):
         chunk_size=10,
         repo_id="repo/test",
     )
-    assert mock_api.upload_file.called
+
+    assert mock_api.upload_folder.called
     assert os.path.exists(tmp_path / "temp_chunks" / "data_ledger.json")

@@ -5,8 +5,15 @@ import dataclasses
 from adjaxt.sharding import save_checkpoint, ModelWeightMap
 import adjaxt
 
+
 def dataclass_to_dict(obj):
     """Recursively serializes dataclasses to dictionaries for config.json."""
+    import dataclasses
+    
+    # Handle JAX dtypes specifically
+    if hasattr(obj, "name") and type(obj).__name__ == "dtype":
+        return str(obj.name)
+        
     if dataclasses.is_dataclass(obj):
         res = {}
         for k, v in obj.__dict__.items():
@@ -15,6 +22,31 @@ def dataclass_to_dict(obj):
             res[k] = dataclass_to_dict(v)
         return res
     return obj
+
+def dict_to_dataclass(cls, data: dict):
+    import dataclasses
+    import jax.numpy as jnp
+    
+    if not dataclasses.is_dataclass(cls):
+        # Convert dtype strings back to actual jnp dtypes
+        if isinstance(data, str) and hasattr(jnp, data):
+            return getattr(jnp, data)
+        return data
+
+    fields = {f.name: f.type for f in dataclasses.fields(cls)}
+    init_kwargs = {}
+    for k, v in data.items():
+        if k in fields:
+            ftype = fields[k]
+            if dataclasses.is_dataclass(ftype) and isinstance(v, dict):
+                init_kwargs[k] = dict_to_dataclass(ftype, v)
+            else:
+                # Convert string to dtype if the field expects a jnp.dtype
+                if isinstance(v, str) and hasattr(jnp, v):
+                    init_kwargs[k] = getattr(jnp, v)
+                else:
+                    init_kwargs[k] = v
+    return cls(**init_kwargs)
 
 def export_arbitrary_model_to_hf(
     model_type: str,
