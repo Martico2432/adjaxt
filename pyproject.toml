@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "adjaxt"
-version = "0.0.2.12"
+version = "0.0.2.25"
 description = "Distributed training with JAX on free compute, for humans"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,6 +20,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cuda12 = [
+    "jax[cuda12]>=0.4.30",
+]
+cuda13 = [
+    "jax[cuda13]>=0.4.30",
+]
 cuda = [
     "jax[cuda12]>=0.4.30",
 ]

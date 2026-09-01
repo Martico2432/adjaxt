@@ -1,10 +1,11 @@
 from adjaxt.layers import *
 from adjaxt.config import *
 
+
 def init_layer(key, conf):
-    if conf.init_fn is None:
+    if type(conf).init_fn is None:
         raise TypeError("Object passed to init_layer was not a valid config, or lacks init_fn field")
-    return conf.init_fn(key, conf)
+    return type(conf).init_fn(key, conf)
 
 def flatten_dl(d, parent_key=''):
     if isinstance(d, dict):
@@ -22,13 +23,13 @@ def flatten_dl(d, parent_key=''):
             raise ValueError("Weight map has to be a dict (on top level)")
         yield parent_key, d
 
-def pipeline(**kwargs):
-    weights = { k: init_layer(v) for k, v in kwargs.items() }
-    fns = { k: v.exec_fn for k, v in kwargs.items() }
+def pipeline(key, cfg: dict):
+    weights = { k: init_layer(key, v) for k, v in cfg.items() }
+    fns = { k: v.exec_fn for k, v in cfg.items() }
     
     @jax.jit
     def pipe(x: jax.Array, w: dict, cfg: dict):
-        for k, v in kwargs.items():
+        for k, v in cfg.items():
             x = fns[k](x, w[k], cfg[k]) 
         return x
         

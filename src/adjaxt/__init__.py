@@ -17,7 +17,7 @@ from adjaxt import layers, models, model_maps, sharding, export, optim, approx, 
 from adjaxt.approx import WorkerPlan, approx, benchmark_step_throughput
 from adjaxt.train import fit, push_fit
 
-__version__ = "0.0.2.12"
+__version__ = "0.0.2.25"
 
 __all__ = [
     # Configs
