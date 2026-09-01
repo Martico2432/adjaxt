@@ -8,6 +8,7 @@ import optax
 # RMS Norm
 # ===================================================================================
 
+@exec_fn_for(RMSNormConfig)
 def rms_norm(x: jax.Array, w: jax.Array, cfg: RMSNormConfig) -> jax.Array:
     # Norms should compute in float32 for numerical stability
     x32 = x.astype(jnp.float32)
@@ -18,6 +19,7 @@ def rms_norm(x: jax.Array, w: jax.Array, cfg: RMSNormConfig) -> jax.Array:
     
     return normed.astype(cfg.precision.output_dtype)
 
+@init_fn_for(RMSNormConfig)
 def rms_norm_init(key, cfg: RMSNormConfig) -> jax.Array:
     return jnp.ones((cfg.dim,), dtype=cfg.precision.param_dtype)
 
@@ -45,6 +47,7 @@ def apply_rot_pos_emb(q: jax.Array, k: jax.Array, cos: jax.Array, sin: jax.Array
 # SwiGLU
 # ===================================================================================
 
+@exec_fn_for(SwiGLUConfig)
 def swiglu(x: jax.Array, w: dict, cfg: SwiGLUConfig) -> jax.Array:
     c_dtype = cfg.precision.compute_dtype
     x_c = x.astype(c_dtype)
@@ -57,6 +60,7 @@ def swiglu(x: jax.Array, w: dict, cfg: SwiGLUConfig) -> jax.Array:
     
     return out.astype(cfg.precision.output_dtype)
 
+@init_fn_for(SwiGLUConfig)
 def swiglu_init(key, cfg: SwiGLUConfig) -> dict:
     k1, k2, k3 = jax.random.split(key, 3)
     def kaiming(k, shape):
@@ -76,6 +80,7 @@ def repeat_kv(hidden_states: jax.Array, n_rep: int) -> jax.Array:
         return hidden_states
     return jnp.repeat(hidden_states, n_rep, axis=2)
 
+@exec_fn_for(GQAAttnConfig)
 def gqa_attn(
     q: jax.Array,
     k: jax.Array,
@@ -108,6 +113,7 @@ def gqa_attn(
 # Qwen3 Attention
 # ===================================================================================
 
+@exec_fn_for(Qwen3AttnConfig)
 def qwen3_attn(
     x: jax.Array,
     w: dict,
@@ -149,6 +155,7 @@ def qwen3_attn(
     out = attn_out @ o_proj
     return out.astype(cfg.precision.output_dtype)
 
+@init_fn_for(Qwen3AttnConfig)
 def qwen3_attn_init(key, cfg: Qwen3AttnConfig) -> dict:
     k1, k2, k3, k4 = jax.random.split(key, 4)
     res = 1.0 / math.sqrt(2 * cfg.n_layers)
@@ -170,6 +177,7 @@ def qwen3_attn_init(key, cfg: Qwen3AttnConfig) -> dict:
 # Qwen3 MLP
 # ===================================================================================
 
+@exec_fn_for(Qwen3MLPConfig)
 def qwen3_mlp(x: jax.Array, w: dict, cfg: Qwen3MLPConfig) -> jax.Array:
     c_dtype = cfg.precision.compute_dtype
     x_c = x.astype(c_dtype)
@@ -183,6 +191,7 @@ def qwen3_mlp(x: jax.Array, w: dict, cfg: Qwen3MLPConfig) -> jax.Array:
     
     return out.astype(cfg.precision.output_dtype)
 
+@init_fn_for(Qwen3MLPConfig)
 def qwen3_mlp_init(key, cfg: Qwen3MLPConfig) -> dict:
     k1, k2, k3 = jax.random.split(key, 3)
     def kaiming(k, shape):
@@ -197,6 +206,7 @@ def qwen3_mlp_init(key, cfg: Qwen3MLPConfig) -> dict:
 # Qwen3 MoE Block
 # ===================================================================================
 
+@exec_fn_for(Qwen3MoEBlockConfig)
 def qwen3_moe_block(x: jax.Array, w: dict, cfg: Qwen3MoEBlockConfig) -> jax.Array:
     tokens = x.reshape(-1, x.shape[-1])                     # (T, d)
     
@@ -220,6 +230,7 @@ def qwen3_moe_block(x: jax.Array, w: dict, cfg: Qwen3MoEBlockConfig) -> jax.Arra
     
     return out.reshape(x.shape)
 
+@init_fn_for(Qwen3MoEBlockConfig)
 def qwen3_moe_block_init(key, cfg: Qwen3MoEBlockConfig) -> dict:
     k_router, k_experts = jax.random.split(key, 2)
     expert_keys = jax.random.split(k_experts, cfg.num_experts)
@@ -232,6 +243,7 @@ def qwen3_moe_block_init(key, cfg: Qwen3MoEBlockConfig) -> dict:
 # Qwen3 MoE Layer
 # ===================================================================================
 
+@exec_fn_for(Qwen3MoELayerConfig)
 def qwen3_moe_layer(x: jax.Array, w: dict, cfg: Qwen3MoELayerConfig) -> jax.Array:
     # x is guaranteed to be in output_dtype (float32) throughout the residual stream
     residual = x
@@ -245,6 +257,7 @@ def qwen3_moe_layer(x: jax.Array, w: dict, cfg: Qwen3MoELayerConfig) -> jax.Arra
     
     return residual + x
 
+@init_fn_for(Qwen3MoELayerConfig)
 def qwen3_moe_layer_init(key, cfg: Qwen3MoELayerConfig) -> dict:
     attn_key, mlp_key, k3, k4 = jax.random.split(key, 4)
     return {
@@ -258,6 +271,7 @@ def qwen3_moe_layer_init(key, cfg: Qwen3MoELayerConfig) -> dict:
 # Qwen3 MoE Model
 # ===================================================================================
 
+@exec_fn_for(Qwen3MoEModelConfig)
 def qwen3_moe_model(x: jax.Array, w: dict, cfg: Qwen3MoEModelConfig) -> jax.Array:
     x = w["embeds"][x].astype(cfg.precision.output_dtype)
     
@@ -274,6 +288,7 @@ def qwen3_moe_model(x: jax.Array, w: dict, cfg: Qwen3MoEModelConfig) -> jax.Arra
     logits = x_c @ lm_head
     return logits.astype(jnp.float32) # Always return loss inputs in f32
 
+@init_fn_for(Qwen3MoEModelConfig)
 def qwen3_moe_model_init(key, cfg: Qwen3MoEModelConfig) -> dict:
     k_embed, k_layers, k_norm, k_head = jax.random.split(key, 4)
     p_dtype = cfg.precision.param_dtype

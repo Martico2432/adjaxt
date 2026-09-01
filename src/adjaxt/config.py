@@ -5,6 +5,20 @@ import jax
 import jax.numpy as jnp
 from typing import Callable
 
+config_classes = []
+
+def config_class(cls):
+    config_classes.append(cls)
+    return cls
+
+def init_fn_for(cls, cfg_class):
+    cfg_class.init_fn = cls
+    return cls
+
+def exec_fn_for(cls, cfg_class):
+    cfg_class.exec_fn = cls
+    return cls
+
 @dataclass(frozen=True)
 class PrecisionPolicy:
     param_dtype: jnp.dtype = jnp.bfloat16    # Storage dtype in memory

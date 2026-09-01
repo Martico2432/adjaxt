@@ -4,3 +4,5 @@ dist/
 tests/__pycache__/
 src/adjaxt/__pycache__/
 run_cord.py
+checkd.py
+adjaxt.svg

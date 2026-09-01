@@ -24,7 +24,7 @@ from adjaxt.sharding import save_checkpoint, ModelWeightMap
 import adjaxt.config as cfg_module
 from adjaxt.optim import create_hybrid_muon_adamw
 from adjaxt.approx import WorkerPlan, benchmark_step_throughput
-
+    
 # =========================================================================
 # Type-Safety Utilities for Mixed Precision
 # =========================================================================
@@ -109,21 +109,24 @@ def claim_next_chunk(
     token: Optional[str] = None,
     max_retries: int = 5,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Claims an available Parquet chunk using optimized filesystem targeted globbing."""
-    fs = HfFileSystem(token=token)
-    base_path = f"datasets/{repo_id}"
-
+    """Claims an available Parquet chunk using a single fresh API call to avoid caching bugs."""
     for _ in range(max_retries):
         try:
-            # OPTIMIZATION: Instead of `list_repo_files` (which fetches the entire repository tree),
-            # we use HfFileSystem to only fetch the exact directories we care about.
-            all_files = [os.path.basename(f) for f in fs.glob(f"{base_path}/pretokenized/*.parquet")]
-            completed_files = [os.path.basename(f) for f in fs.glob(f"{base_path}/completed/*.json")]
-            claimed_files = [os.path.basename(f) for f in fs.glob(f"{base_path}/claims/*.json")]
-
-            all_chunks = {f.replace('.parquet', '') for f in all_files}
-            completed_chunks = {f.replace('.json', '') for f in completed_files}
-            claimed_chunks = {re.sub(r'__.*\.json$', '', f) for f in claimed_files}
+            # 1. Fetch fresh repository state (Single API call, no caching bugs)
+            all_repo_files = api.list_repo_files(repo_id=repo_id, repo_type="dataset", token=token)
+            
+            all_chunks = {
+                f.split("/")[-1].replace('.parquet', '') 
+                for f in all_repo_files if f.startswith("pretokenized/") and f.endswith(".parquet")
+            }
+            completed_chunks = {
+                f.split("/")[-1].replace('.json', '') 
+                for f in all_repo_files if f.startswith("completed/") and f.endswith(".json")
+            }
+            claimed_chunks = {
+                re.sub(r'__.*\.json$', '', f.split("/")[-1]) 
+                for f in all_repo_files if f.startswith("claims/") and f.endswith(".json")
+            }
 
             available = sorted(list(all_chunks - completed_chunks - claimed_chunks))
             if not available:
@@ -137,6 +140,7 @@ def claim_next_chunk(
                 "claimed_at": time.time(),
             }
 
+            # 2. Upload the claim
             with tempfile.TemporaryDirectory() as tmpdir:
                 tmp_path = os.path.join(tmpdir, claim_filename)
                 with open(tmp_path, "w", encoding="utf-8") as f:
@@ -150,10 +154,11 @@ def claim_next_chunk(
 
             time.sleep(1.0)
             
-            # OPTIMIZATION: Check for competing claims ONLY on the specific candidate chunk.
+            # 3. Verify our claim won out against other workers (using a fresh listing)
+            fresh_repo_files = api.list_repo_files(repo_id=repo_id, repo_type="dataset", token=token)
             competing_claims = sorted([
-                os.path.basename(f) 
-                for f in fs.glob(f"{base_path}/claims/{candidate_chunk}__*.json")
+                f.split("/")[-1] for f in fresh_repo_files 
+                if f.startswith(f"claims/{candidate_chunk}__") and f.endswith(".json")
             ])
             
             competing_workers = [
