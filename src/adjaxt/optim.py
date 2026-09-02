@@ -121,19 +121,14 @@ def muon(
 # 3. Hybrid Optimizer (Muon on 2D weights + AdamW on 1D/embeddings)
 # =========================================================================
 def get_param_labels(params):
-    """
-    Labels parameters for hybrid Muon/AdamW optimization:
-      - >= 2D matrices (excluding embeddings) -> 'muon'
-      - < 2D vectors (biases, layer norms) and embeddings -> 'adamw'
-    """
     def _label(path, val):
         str_path = "/".join(str(p.key if hasattr(p, "key") else p) for p in path).lower()
-        if "embed" in str_path or getattr(val, "ndim", 0) < 2:
+        # Route embeddings, 1D params (norms/biases), AND output heads to AdamW
+        if any(k in str_path for k in ("embed", "head")) or getattr(val, "ndim", 0) < 2:
             return "adamw"
         return "muon"
 
     return jax.tree_util.tree_map_with_path(_label, params)
-
 
 def create_hybrid_muon_adamw(
     learning_rate: float = 6e-4,

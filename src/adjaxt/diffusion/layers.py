@@ -387,3 +387,4 @@ def mdl_model_fwd(
     canvas_start = C_prev + cfg.scratch_len
     clean_canvas_tokens = seq[:, canvas_start : canvas_start + cfg.canvas_len]
     return clean_canvas_tokens
+
