@@ -47,6 +47,77 @@ def make_canvas_rope_indices(context_len: int, scratch_len: int, canvas_len: int
 def modulate(x: jax.Array, shift: jax.Array, scale: jax.Array) -> jax.Array:
     return x * (1.0 + scale[:, None, :]) + shift[:, None, :]
 
+def apply_levenshtein_deletions(
+    seq: jax.Array,           # (B, L)
+    del_logits: jax.Array,    # (B, L, 2)
+    is_editable: jax.Array,   # (B, L) bool
+    pad_token_id: int
+) -> jax.Array:
+    B, L = seq.shape
+    # Class 1 = DELETE, Class 0 = KEEP
+    should_delete = (del_logits[..., 1] > del_logits[..., 0]) & is_editable
+    keep = ~should_delete
+    
+    # Destination index for each surviving token (0, 1, 2, ...)
+    dest_idx = jnp.cumsum(keep.astype(jnp.int32), axis=-1) - 1
+    safe_dest = jnp.where(keep, dest_idx, L)  # Send deleted tokens to dummy index L
+    
+    # Static buffer with dummy slot L to absorb deleted tokens without collision
+    compacted = jnp.full((B, L + 1), pad_token_id, dtype=seq.dtype)
+    b_idx = jnp.arange(B)[:, None]
+    compacted = compacted.at[b_idx, safe_dest].set(seq)
+    
+    return compacted[:, :L]
+
+def apply_levenshtein_insertions(
+    seq: jax.Array,           # (B, L)
+    ins_logits: jax.Array,    # (B, L - 1, max_insert + 1)
+    is_editable: jax.Array,   # (B, L) bool
+    mask_token_id: int
+) -> jax.Array:
+    B, L = seq.shape
+    ins_counts = jnp.argmax(ins_logits, axis=-1)  # (B, L - 1)
+    
+    # Only allow insertions inside editable boundaries
+    editable_boundary = is_editable[:, :-1] & is_editable[:, 1:]
+    ins_counts = jnp.where(editable_boundary, ins_counts, 0)
+    
+    # Total inserted tokens before index i
+    cum_ins = jnp.pad(jnp.cumsum(ins_counts, axis=-1), ((0, 0), (1, 0)))  # (B, L)
+    new_pos = jnp.arange(L)[None, :] + cum_ins                           # (B, L)
+    
+    # Target buffer initialized to [MASK]
+    expanded = jnp.full((B, L + 1), mask_token_id, dtype=seq.dtype)
+    safe_pos = jnp.where(new_pos < L, new_pos, L)
+    
+    b_idx = jnp.arange(B)[:, None]
+    # new_pos is strictly monotonically increasing -> zero scatter collisions
+    expanded = expanded.at[b_idx, safe_pos].set(seq)
+    
+    return expanded[:, :L]
+
+def apply_scratchpad_expansion(
+    seq: jax.Array,           # (B, L)
+    ins_logits: jax.Array,    # (B, L - 1, max_insert + 1)
+    mask_token_id: int,
+    scratch_start: int,
+    scratch_len: int
+) -> jax.Array:
+    """
+    Uses highest-entropy insertion predictions to populate the scratchpad
+    with [MASK] slots for refinement in the next diffusion cycle.
+    """
+    # Number of insertions predicted per boundary
+    ins_counts = jnp.argmax(ins_logits, axis=-1)  # (B, L - 1)
+    has_insertions = (ins_counts > 0)
+    
+    # If the canvas requires new tokens, ensure scratchpad slots are active [MASK]
+    scratch_indices = jnp.arange(scratch_start, scratch_start + scratch_len)
+    seq = seq.at[:, scratch_indices].set(
+        jnp.where(jnp.any(has_insertions, axis=-1, keepdims=True), mask_token_id, seq[:, scratch_indices])
+    )
+    return seq
+
 @exec_fn_for(MDLMAttentionConfig)
 def mdlm_attn_fwd(
     x: jax.Array, 
@@ -253,7 +324,9 @@ def mdl_model_fwd(
     B = prefix_ids.shape[0]
     C_prev = prefix_ids.shape[1]
     active_len = cfg.scratch_len + cfg.canvas_len
+    pad_token_id = 0
     
+    # 1. Initialize scratchpad and canvas with [MASK]
     active_init = jnp.full((B, active_len), cfg.mask_token_id, dtype=jnp.int32)
     seq = jnp.concatenate([prefix_ids, active_init], axis=1)
     is_editable = jnp.zeros_like(seq, dtype=jnp.bool_).at[:, C_prev:].set(True)
@@ -261,7 +334,7 @@ def mdl_model_fwd(
     pos_ids = make_canvas_rope_indices(C_prev, cfg.scratch_len, cfg.canvas_len)
     total_blocks = cfg.diff_blocks_num
     
-    # Iterate from high noise (Block 0) to clean output (Block B-1)
+    # 2. Diffusion Drafting Pass (Block 0 -> Block B-1)
     for b_idx in range(total_blocks):
         t_min, t_max = get_block_noise_bounds(b_idx, total_blocks)
         t_steps = [t_max - i * (t_max - t_min) / (cfg.steps_per_block - 1) for i in range(cfg.steps_per_block)]
@@ -273,7 +346,7 @@ def mdl_model_fwd(
             key, k_sample, k_mask = jax.random.split(key, 3)
             t_tensor = jnp.full((B,), t_curr)
             
-            token_logits, del_logits, _ = forward_network(
+            token_logits, _, _ = forward_network(
                 seq, t_tensor, params, cfg, block_idx=b_idx, pos_ids=pos_ids
             )
             
@@ -287,6 +360,30 @@ def mdl_model_fwd(
             
             seq = jnp.where((t_next > 0.0) & should_remask, cfg.mask_token_id, seq_cand)
 
+    # 3. Levenshtein Edit Cycle (Clean Drafting Phase at t = 0.0)
+    t_zero = jnp.zeros((B,))
+    fine_block_idx = total_blocks - 1
+
+    # Pass A: Evaluate draft sequence to obtain deletion and insertion logits
+    _, del_logits, ins_logits = forward_network(
+        seq, t_zero, params, cfg, block_idx=fine_block_idx, pos_ids=pos_ids
+    )
+
+    # Pass B: Delete unwanted / erroneous tokens
+    seq = apply_levenshtein_deletions(seq, del_logits, is_editable, pad_token_id=cfg.mask_token_id)
+
+    # Pass C: Insert [MASK] placeholders where ins_logits requests insertions
+    seq = apply_levenshtein_insertions(seq, ins_logits, is_editable, mask_token_id=cfg.mask_token_id)
+
+    # Pass D: Denoise newly inserted [MASK] tokens with the language model head
+    key, k_infill = jax.random.split(key)
+    token_logits, _, _ = forward_network(
+        seq, t_zero, params, cfg, block_idx=fine_block_idx, pos_ids=pos_ids
+    )
+    infilled_tokens = jax.random.categorical(k_infill, token_logits, axis=-1)
+    seq = jnp.where((seq == cfg.mask_token_id) & is_editable, infilled_tokens, seq)
+
+    # 4. Extract Finalized Canvas
     canvas_start = C_prev + cfg.scratch_len
     clean_canvas_tokens = seq[:, canvas_start : canvas_start + cfg.canvas_len]
     return clean_canvas_tokens
