@@ -1,6 +1,6 @@
 from dataclasses import field
 import dataclasses
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Literal
 from enum import StrEnum
 import jax
 import jax.numpy as jnp
@@ -15,11 +15,11 @@ def config_class(cls):
     intelligently separating JAX arrays from static metadata.
     """
     cls = dataclasses.dataclass(cls)
-    
+
     def tree_flatten(self):
         dynamic_children = {}
         static_aux_data = {}
-        
+
         for f in dataclasses.fields(self):
             val = getattr(self, f.name)
             # If it's a JAX array, or another registered PyTree (like GQAAttnConfig)
@@ -29,7 +29,7 @@ def config_class(cls):
             else:
                 # Ints, floats, strings, and PrecisionPolicy go to static metadata
                 static_aux_data[f.name] = val
-                
+
         # JAX requires children to be an iterable, and aux_data to contain enough
         # info to reconstruct the object (we pass the keys and static values)
         children_keys, children_vals = tuple(dynamic_children.keys()), tuple(dynamic_children.values())
@@ -37,14 +37,14 @@ def config_class(cls):
 
     def tree_unflatten(cls_obj, aux_data, children_vals):
         children_keys, static_aux_data = aux_data
-        
+
         # Zip the dynamic children back with their field names
         reconstructed_children = dict(zip(children_keys, children_vals))
-        
+
         # Combine dynamic and static kwargs to rebuild the dataclass
         kwargs = {**reconstructed_children, **static_aux_data}
-        
-        # Use __new__ to avoid calling __post_init__ again during unflattening, 
+
+        # Use __new__ to avoid calling __post_init__ again during unflattening,
         # which would regenerate the RoPE tables unnecessarily!
         obj = object.__new__(cls_obj)
         for key, value in kwargs.items():
@@ -55,7 +55,7 @@ def config_class(cls):
     cls.tree_unflatten = classmethod(tree_unflatten)
     cls = register_pytree_node_class(cls)
     config_classes.append(cls)
-    
+
     return cls
 
 def init_fn_for(cfg_class):
@@ -110,9 +110,9 @@ def compute_rope_freqs(seq_len: int, head_dim: int, theta: float = 10000.0):
     inv_freq = 1.0 / (theta ** (dim_indices / head_dim))
     t = jnp.arange(seq_len, dtype=jnp.float32)
     freqs = jnp.outer(t, inv_freq)
-    
+
     freqs = jnp.concatenate([freqs, freqs], axis=-1)
-    
+
     cos = jnp.cos(freqs)[None, :, None, :]
     sin = jnp.sin(freqs)[None, :, None, :]
     return cos, sin
@@ -128,18 +128,18 @@ class Qwen3AttnConfig:
     rope_theta: float
     max_position_embeddings: int
     n_layers: int
-    
+
     # 1. Use default_factory to generate a new instance safely
     precision: PrecisionPolicy = field(default_factory=PrecisionPolicy)
-    
+
     # 2. Keep these as they are (init=False is correct here)
     cos_table: jax.Array = field(init=False, compare=False, hash=False)
     sin_table: jax.Array = field(init=False, compare=False, hash=False)
 
     def __post_init__(self):
         cos, sin = compute_rope_freqs(
-            self.max_position_embeddings, 
-            self.head_dim, 
+            self.max_position_embeddings,
+            self.head_dim,
             self.rope_theta
         )
         object.__setattr__(self, "cos_table", cos)
@@ -182,4 +182,16 @@ class Qwen3MoEModelConfig:
 class MHAAttentionConfig:
     implementation: StandardAttnImplementation
     is_causal: bool
+    precision: PrecisionPolicy = field(default_factory=PrecisionPolicy)
+
+@config_class
+class CCEConfig:
+    reduction: Literal["mean", "sum", "none"] = "mean"
+    ignore_index: int = -100
+    shift: bool = True # Does causal shift for NTP
+
+    chunk_size: int = 2048
+    soft_cap: int | None = None # Cap logits
+    filter_eps: float | None = None
+
     precision: PrecisionPolicy = field(default_factory=PrecisionPolicy)

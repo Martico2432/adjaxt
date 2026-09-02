@@ -20,8 +20,8 @@ class MDLMAttentionConfig:
 
     def __post_init__(self):
         cos, sin = compute_rope_freqs(
-            self.max_position_embeddings, 
-            self.head_dim, 
+            self.max_position_embeddings,
+            self.head_dim,
             self.rope_theta
         )
         object.__setattr__(self, "cos_table", cos)
@@ -57,7 +57,7 @@ class MDLModelConfig:
     max_insert: int = 4
     scratch_len: int = 8
     canvas_len: int = 20
-    mask_token_id: int = 32000
+    mask_token_id: int = 7
     steps_per_block: int = 2
     diff_blocks_num: int = 6
     final_rms_conf: RMSNormConfig = field(default_factory=RMSNormConfig)

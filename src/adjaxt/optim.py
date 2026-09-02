@@ -73,7 +73,8 @@ def muon(
     momentum: float = 0.95,
     nesterov: bool = True,
     ns_steps: int = 5,
-    weight_decay: float = 0.01,
+    *,
+    scheduler: optax.Schedule,
 ) -> optax.GradientTransformation:
     """Standard Muon optimizer transformation applying polar orthogonalization."""
     def init_fn(params):
@@ -93,7 +94,6 @@ def muon(
             state.momentum,
         )
 
-        # 2. Compute update PyTree
         def _calc_update(g, m, p):
             if g.ndim != 2:
                 return g
@@ -131,8 +131,8 @@ def get_param_labels(params):
     return jax.tree_util.tree_map_with_path(_label, params)
 
 def create_hybrid_muon_adamw(
-    learning_rate: float = 6e-4,
-    adamw_lr: Optional[float] = None,
+    learning_rate: Union[float, optax.Schedule] = 6e-4,
+    adamw_lr: Optional[Union[float, optax.Schedule]] = None,
     muon_momentum: float = 0.95,
     adamw_b1: float = 0.9,
     adamw_b2: float = 0.95,
@@ -141,7 +141,11 @@ def create_hybrid_muon_adamw(
 ) -> optax.GradientTransformation:
     """Partitions 2D weights to Muon and 1D vectors/embeddings to AdamW."""
     if adamw_lr is None:
-        adamw_lr = learning_rate * 0.5
+        if callable(learning_rate):
+            # Scale the entire schedule curve by 0.5 for AdamW
+            adamw_lr = lambda count: 0.5 * learning_rate(count)
+        else:
+            adamw_lr = learning_rate * 0.5
 
     muon_opt = muon(
         learning_rate=learning_rate,
@@ -166,12 +170,27 @@ def create_hybrid_muon_adamw(
 # 4. Builder Dispatcher
 # =========================================================================
 def build_optimizer_from_config(config: dict) -> optax.GradientTransformation:
-    """Builds the optimizer directly from train_config.json specifications."""
     opt_type = str(config.get("optimizer_type", "muon")).lower()
-    lr = float(config.get("inner_lr", 6e-4))
+    peak_lr = float(config.get("inner_lr", 6e-4))
+    min_lr = float(config.get("min_lr", peak_lr * 0.1))
     wd = float(config.get("weight_decay", 0.01))
 
-    if opt_type in ("muon", "hybrid", "hybrid_muon"):
-        return create_hybrid_muon_adamw(learning_rate=lr, weight_decay=wd)
+    total_steps = int(config.get("total_steps", 10_000))
+    warmup_steps = int(config.get("warmup_steps", 1_000))
 
-    return optax.adamw(learning_rate=lr, weight_decay=wd)
+    # Define the warmup + cosine decay schedule
+    lr_schedule = optax.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=peak_lr,
+        warmup_steps=warmup_steps,
+        decay_steps=total_steps,
+        end_value=min_lr,
+    )
+
+    if opt_type in ("muon", "hybrid", "hybrid_muon"):
+        return create_hybrid_muon_adamw(
+            learning_rate=lr_schedule,
+            weight_decay=wd,
+        )
+
+    return optax.adamw(learning_rate=lr_schedule, weight_decay=wd)
