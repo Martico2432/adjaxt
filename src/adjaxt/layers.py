@@ -72,6 +72,29 @@ def swiglu_init(key, cfg: SwiGLUConfig) -> dict:
     }
 
 # ===================================================================================
+# Full MHA Attention
+# ===================================================================================
+
+@exec_fn_for(MHAAttentionConfig)
+def mha_attn(
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    cfg: MHAAttentionConfig,
+    attn_mask: jax.Array = None
+) -> jax.Array:
+    causal_flag = cfg.is_causal if attn_mask is None else False
+    out = jax.nn.dot_product_attention(
+        query=q,
+        key=k,
+        value=v,
+        mask=attn_mask,
+        is_causal=causal_flag,
+        implementation=cfg.implementation
+    )
+    return out
+
+# ===================================================================================
 # GQA Attention
 # ===================================================================================
 

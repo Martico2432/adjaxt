@@ -177,3 +177,9 @@ class Qwen3MoEModelConfig:
     d_model: int
     tie_word_embeddings: bool = False
     precision: PrecisionPolicy = field(default_factory=PrecisionPolicy)
+
+@config_class
+class MHAAttentionConfig:
+    implementation: StandardAttnImplementation
+    is_causal: bool
+    precision: PrecisionPolicy = field(default_factory=PrecisionPolicy)
